@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import { AddTaskDialog } from "@/components/AddTaskDialog";
@@ -29,48 +29,72 @@ interface Task {
 }
 
 const Dashboard = () => {
-  const [tasks, setTasks] = useState<Task[]>([
-    {
-      id: "1",
-      title: "Review project proposal",
-      description: "Go through the new client proposal and provide feedback",
-      priority: "high",
-      dueDate: new Date(),
-      completed: false,
-      createdAt: new Date(),
-    },
-    {
-      id: "2", 
-      title: "Team standup meeting",
-      description: "Daily standup at 9 AM",
-      priority: "medium",
-      completed: false,
-      createdAt: new Date(),
-    },
-    {
-      id: "3",
-      title: "Update documentation",
-      description: "Complete the API documentation updates",
-      priority: "low",
-      completed: true,
-      createdAt: new Date(),
-    }
-  ]);
-  
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  // Gemini prioritization state
+  const [prioritizing, setPrioritizing] = useState(false);
+  const [prioritizedResult, setPrioritizedResult] = useState<string | null>(null);
+  const [prioritizeError, setPrioritizeError] = useState<string | null>(null);
 
-  const handleTaskAdd = (newTask: Task) => {
-    setTasks(prev => [newTask, ...prev]);
+  // Fetch tasks from backend on mount
+  useEffect(() => {
+    fetch('/api/tasks')
+      .then(res => res.json())
+      .then(data => {
+        // Convert string dates to Date objects if needed
+        setTasks(data.map((t: any) => ({
+          ...t,
+          dueDate: t.dueDate ? new Date(t.dueDate) : undefined,
+          createdAt: t.createdAt ? new Date(t.createdAt) : new Date(),
+          completed: t.completed === 1 || t.completed === true
+        })));
+      });
+  }, []);
+
+  const handleTaskAdd = async (newTask: Task) => {
+    // Send new task to backend
+    const res = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+  title: newTask.title,
+  description: newTask.description,
+  priority: newTask.priority,
+  dueDate: newTask.dueDate ? newTask.dueDate.toISOString().slice(0, 19).replace('T', ' ') : null,
+  reminderTime: newTask.reminderTime,
+  completed: newTask.completed ? 1 : 0,
+}),
+    });
+    if (res.ok) {
+      // Refetch tasks from backend to keep in sync
+      const updated = await fetch('/api/tasks').then(r => r.json());
+      setTasks(updated.map((t: any) => ({
+        ...t,
+        dueDate: t.dueDate ? new Date(t.dueDate) : undefined,
+        createdAt: t.createdAt ? new Date(t.createdAt) : new Date(),
+        completed: t.completed === 1 || t.completed === true
+      })));
+    }
   };
 
-  const toggleTaskCompletion = (taskId: string) => {
-    setTasks(prev => 
-      prev.map(task => 
-        task.id === taskId 
-          ? { ...task, completed: !task.completed }
-          : task
-      )
-    );
+  const toggleTaskCompletion = async (taskId: string) => {
+    // Find the target task
+    const task = tasks.find(t => t.id === taskId);
+    if (!task) return;
+    // Send update to backend
+    await fetch(`/api/tasks/${taskId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...task, completed: !task.completed }),
+    });
+    // Refetch tasks
+    const updated = await fetch('/api/tasks').then(r => r.json());
+    setTasks(updated.map((t: any) => ({
+      ...t,
+      dueDate: t.dueDate ? new Date(t.dueDate) : undefined,
+      createdAt: t.createdAt ? new Date(t.createdAt) : new Date(),
+      completed: t.completed === 1 || t.completed === true
+    })));
   };
 
   const getPriorityColor = (priority: string) => {
@@ -85,6 +109,35 @@ const Dashboard = () => {
   const completedTasks = tasks.filter(task => task.completed).length;
   const totalTasks = tasks.length;
   const pendingTasks = totalTasks - completedTasks;
+
+  // Call Gemini prioritize endpoint
+  const handlePrioritizeTasks = async () => {
+    setPrioritizing(true);
+    setPrioritizeError(null);
+    setPrioritizedResult(null);
+    try {
+      // Prepare tasks for backend (convert Date to string)
+      const payload = {
+        tasks: tasks.map(t => ({
+          title: t.title,
+          deadline: t.dueDate ? t.dueDate.toISOString() : '',
+          priority: t.priority,
+        }))
+      };
+      const res = await fetch("/api/gemini/prioritize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error("Failed to get prioritization");
+      const data = await res.json();
+      setPrioritizedResult(data.response);
+    } catch (err: any) {
+      setPrioritizeError(err.message || "Unknown error");
+    } finally {
+      setPrioritizing(false);
+    }
+  };
 
   return (
     <SidebarProvider>
@@ -231,37 +284,114 @@ const Dashboard = () => {
               </CardContent>
             </Card>
 
+            {/* AI Task Prioritization */}
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Brain className="h-5 w-5 text-primary" />
+                      AI Task Prioritization
+                    </CardTitle>
+                    <CardDescription>
+                      Get AI-powered task prioritization based on your current tasks
+                    </CardDescription>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handlePrioritizeTasks}
+                    disabled={prioritizing || tasks.length === 0}
+                  >
+                    {prioritizing ? (
+                      <span>Prioritizing...</span>
+                    ) : (
+                      <span>Prioritize Tasks</span>
+                    )}
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {/* Error display */}
+                {prioritizeError && (
+                  <div className="p-4 bg-destructive/10 rounded-lg border border-destructive/20 mb-4">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-destructive rounded-full"></div>
+                      <p className="text-sm text-destructive font-medium">Error: {prioritizeError}</p>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Prioritized tasks display */}
+                {prioritizedResult && (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-2 h-2 bg-primary rounded-full"></div>
+                      <h4 className="font-semibold text-sm">AI Prioritization Result</h4>
+                    </div>
+                    <div className="bg-gradient-to-r from-primary/5 to-primary/10 rounded-lg p-4 border border-primary/20">
+                      <div className="whitespace-pre-line text-sm leading-relaxed">
+                        {prioritizedResult}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Empty state */}
+                {!prioritizedResult && !prioritizeError && !prioritizing && (
+                  <div className="text-center py-8">
+                    <Brain className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
+                    <p className="text-sm text-muted-foreground mb-2">No prioritization yet</p>
+                    <p className="text-xs text-muted-foreground">
+                      {tasks.length === 0 
+                        ? "Add some tasks first, then click 'Prioritize Tasks' to get AI recommendations"
+                        : "Click 'Prioritize Tasks' to get AI-powered task prioritization"}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Loading state */}
+                {prioritizing && (
+                  <div className="text-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-3"></div>
+                    <p className="text-sm text-muted-foreground">Analyzing your tasks...</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
             {/* AI Suggestions */}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  <Brain className="h-5 w-5 text-primary" />
-                  AI Suggestions
+                  <TrendingUp className="h-5 w-5 text-primary" />
+                  Smart Suggestions
                 </CardTitle>
                 <CardDescription>
-                  Smart recommendations to improve your productivity
+                  Productivity tips and insights
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
                   <div className="p-3 bg-accent/50 rounded-lg border-l-4 border-primary">
                     <p className="text-sm">
-                      🎯 <strong>Focus Time:</strong> You have 3 high-priority tasks. Consider blocking 2 hours of focus time this afternoon.
+                      🎯 <strong>Focus Time:</strong> You have {tasks.filter(t => t.priority === 'high' && !t.completed).length} high-priority tasks. Consider blocking focus time.
                     </p>
                   </div>
                   <div className="p-3 bg-accent/50 rounded-lg border-l-4 border-warning">
                     <p className="text-sm">
-                      ⏰ <strong>Schedule Reminder:</strong> "Team standup meeting" is due soon but has no specific time set.
+                      ⏰ <strong>Schedule Reminder:</strong> {tasks.filter(t => !t.dueDate && !t.completed).length} tasks need due dates.
                     </p>
                   </div>
                   <div className="p-3 bg-accent/50 rounded-lg border-l-4 border-success">
                     <p className="text-sm">
-                      📈 <strong>Great Progress:</strong> You've completed 67% more tasks this week compared to last week!
+                      📈 <strong>Great Progress:</strong> You've completed {Math.round((completedTasks / totalTasks) * 100) || 0}% of your tasks!
                     </p>
                   </div>
                 </div>
               </CardContent>
             </Card>
+
           </div>
         </main>
 
